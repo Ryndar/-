@@ -5,8 +5,9 @@ import random
 import threading
 import sqlite3
 
-TOKEN = '8435975783:AAHcrtHRtu3aWbQ2ZgFY3m748AFIbSDXMQ4'
-KP_API_KEY = 'bd3ae916-cf12-4969-8c6e-47cf08e65734'
+import os
+TOKEN = os.environ.get('TOKEN')
+KP_API_KEY = os.environ.get('KP_API_KEY')
 
 bot = telebot.TeleBot(TOKEN)
 
