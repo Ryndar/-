@@ -19,6 +19,12 @@ class DummyHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b"Bot is alive and well!")
 
+    # Добавляем этот метод, чтобы Render не ругался ошибкой 501
+    def do_HEAD(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'text/plain')
+        self.end_headers()
+
 def keep_alive():
     # Render автоматически задает переменную окружения PORT, по умолчанию берем 10000
     port = int(os.environ.get('PORT', 10000))
