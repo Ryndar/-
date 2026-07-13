@@ -35,7 +35,22 @@ TOKEN = os.environ.get('TOKEN')
 KP_API_KEY = os.environ.get('KP_API_KEY')
 GOOGLE_CREDENTIALS = os.environ.get('GOOGLE_CREDENTIALS')
 
+# --- ИНИЦИАЛИЗАЦИЯ GOOGLE ТАБЛИЦЫ ---
 sheet = None
+
+try:
+    creds_dict = json.loads(GOOGLE_CREDENTIALS)
+    scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+    creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+    gc = gspread.authorize(creds)
+    
+    # Вставь сюда ID своей таблицы (длинный набор букв/цифр из ссылки в браузере)
+    sheet = gc.open_by_key("1rrIF_fxUQzkmFkgY6FWYmrTBNC4ryuoiM3hUXwk98e0").sheet1
+    print("✅ Успешное подключение к Google Таблице!")
+except Exception as e:
+    print(f"❌ Ошибка подключения к Google Таблицам: {e}")
+    sheet = None
+# -------------------------------------
 
 bot = telebot.TeleBot(TOKEN)
 
