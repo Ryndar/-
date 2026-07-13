@@ -3,7 +3,7 @@ from telebot import types
 import requests
 import random
 import threading
-import sqlite3
+import libsql_client
 
 import os
 TOKEN = os.environ.get('TOKEN')
