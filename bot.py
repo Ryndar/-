@@ -143,7 +143,8 @@ def get_movie_by_id(mid):
             "rating": m.get("ratingKinopoisk", "0"), 
             "genres": genres_list, 
             "poster": m.get("posterUrl", None),
-            "description": desc
+            "description": desc,
+            "length": m.get("filmLength", 0) # Добавлено для фильтрации по длине
         }
         movies_cache[str(mid)] = data
         return data
@@ -180,11 +181,51 @@ def search_movie_kp(query=None, random_popular=False):
         print(f"Ошибка API Кинопоиска: {e}")
         return None
 
+def search_person_kp(name):
+    """Новая функция: Поиск актеров и режиссеров"""
+    headers = {"X-API-KEY": KP_API_KEY}
+    try:
+        url_search = f"https://kinopoiskapiunofficial.tech/api/v1/persons?name={name}"
+        res = requests.get(url_search, headers=headers, timeout=5).json()
+        items = res.get('items', [])
+        if not items: return None
+        
+        person = items[0]
+        person_id = person.get('kinopoiskId')
+        
+        url_details = f"https://kinopoiskapiunofficial.tech/api/v1/staff/{person_id}"
+        details = requests.get(url_details, headers=headers, timeout=5).json()
+        
+        films = details.get('films', [])
+        seen = set()
+        top_films = []
+        for f in films:
+            title = f.get('nameRu')
+            if title and title not in seen:
+                seen.add(title)
+                top_films.append(title)
+                if len(top_films) >= 5: break
+                
+        return {
+            "id": person_id,
+            "name": person.get("nameRu", person.get("nameEn", "Неизвестно")),
+            "poster": person.get("posterUrl"),
+            "profession": details.get("profession", "Деятель кино").capitalize(),
+            "films": top_films
+        }
+    except Exception as e:
+        print(f"Ошибка поиска персоны: {e}")
+        return None
+
 # --- КОМАНДЫ И МЕНЮ ---
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    markup.add("🔍 Найти фильм", "📋 Мои списки", "🎲 Рулетка", "🔥 Тиндер", "📊 Статистика", "🔮 Смарт-Рекомендация")
+    # Обновленные кнопки меню
+    markup.add(types.KeyboardButton("🔍 Поиск (Название/Настроение)"), types.KeyboardButton("👤 Найти автора"))
+    markup.add(types.KeyboardButton("⏳ Кино на вечер"), types.KeyboardButton("📋 Мои списки"))
+    markup.add(types.KeyboardButton("🎲 Рулетка"), types.KeyboardButton("🔥 Тиндер"))
+    markup.add(types.KeyboardButton("📊 Статистика"), types.KeyboardButton("🔮 Смарт-Рекомендация"))
     
     welcome_text = (
         "✨ *ДОБРО ПОЖАЛОВАТЬ В КИНО-ДНЕВНИК* ✨\n"
@@ -192,6 +233,7 @@ def send_welcome(message):
         "Твой персональный гид по кинематографу и трекер просмотренных фильмов.\n\n"
         "▫️ Списки фильмов с авто-фильтрацией по жанрам\n"
         "▫️ Умные рекомендации на базе твоих вкусов\n"
+        "▫️ Поиск по настроению и режиссерам\n"
         "▫️ Синхронизирую всё с твоей Google Таблицей\n"
         "═════════════════════════════\n"
         " Используй нижнее меню для навигации 👇"
@@ -200,9 +242,20 @@ def send_welcome(message):
 
 @bot.message_handler(content_types=['text'])
 def handle_menu_text(message):
-    if message.text == "🔍 Найти фильм":
-        msg = bot.send_message(message.chat.id, "🎬 Напиши название фильма или сериала:")
+    if message.text == "🔍 Поиск (Название/Настроение)":
+        msg = bot.send_message(message.chat.id, "🎬 *Напиши название фильма или опиши настроение* (например: «запутанный детектив» или «комедия про путешествия»):", parse_mode="Markdown")
         bot.register_next_step_handler(msg, process_find_from_menu)
+    elif message.text == "👤 Найти автора":
+        msg = bot.send_message(message.chat.id, "👤 *Напиши имя актера или режиссера* (например: Кристофер Нолан, Райан Гослинг):", parse_mode="Markdown")
+        bot.register_next_step_handler(msg, process_person_search)
+    elif message.text == "⏳ Кино на вечер":
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        markup.add(
+            types.InlineKeyboardButton("🍿 Быстрый фильм (< 1.5 ч)", callback_data="duration|short"),
+            types.InlineKeyboardButton("🎬 Золотая середина (1.5 - 2 ч)", callback_data="duration|medium"),
+            types.InlineKeyboardButton("🍿 Большой эпик (> 2 ч)", callback_data="duration|long")
+        )
+        bot.send_message(message.chat.id, "⏳ *Сколько времени у тебя есть на просмотр?*", parse_mode="Markdown", reply_markup=markup)
     elif message.text == "📋 Мои списки": show_lists_menu(message.chat.id)
     elif message.text == "🎲 Рулетка": send_roulette(message.chat.id)
     elif message.text == "🔥 Тиндер": play_tinder(message.chat.id)
@@ -210,17 +263,49 @@ def handle_menu_text(message):
     elif message.text == "🔮 Смарт-Рекомендация": show_smart_recommendation(message.chat.id)
     else: process_find_from_menu(message)
 
-def process_find_from_menu(message):
-    if message.text in ["🔍 Найти фильм", "📋 Мои списки", "🎲 Рулетка", "🔥 Тиндер", "📊 Статистика", "🔮 Смарт-Рекомендация"]:
+def process_person_search(message):
+    # Защита от случайного клика по меню во время ожидания
+    if message.text in ["🔍 Поиск (Название/Настроение)", "👤 Найти автора", "⏳ Кино на вечер", "📋 Мои списки", "🎲 Рулетка", "🔥 Тиндер", "📊 Статистика", "🔮 Смарт-Рекомендация"]:
         handle_menu_text(message)
         return
         
-    waiting = bot.send_message(message.chat.id, "⚡ Ищу фильм в базе данных...")
+    waiting = bot.send_message(message.chat.id, "👤 Ищу информацию...")
+    person = search_person_kp(message.text.strip())
+    bot.delete_message(message.chat.id, waiting.message_id)
+    
+    if not person:
+        bot.send_message(message.chat.id, "❌ Персона не найдена. Попробуй другое имя.")
+        return
+        
+    films_str = "\n".join([f"▫️ {f}" for f in person['films']]) if person['films'] else "Нет известных фильмов"
+    
+    caption = (
+        f"👤 *{person['name']}*\n"
+        f"═══════════════════════════\n"
+        f"🎬 Профессия: _{person['profession']}_\n\n"
+        f"🏆 *Лучшие работы:*\n"
+        f"{films_str}\n"
+        f"═══════════════════════════"
+    )
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("🌐 Профиль на Кинопоиске", url=f"https://www.kinopoisk.ru/name/{person['id']}/"))
+    
+    if person['poster']:
+        bot.send_photo(message.chat.id, person['poster'], caption=caption, parse_mode="Markdown", reply_markup=markup)
+    else:
+        bot.send_message(message.chat.id, caption, parse_mode="Markdown", reply_markup=markup)
+
+def process_find_from_menu(message):
+    if message.text in ["🔍 Поиск (Название/Настроение)", "👤 Найти автора", "⏳ Кино на вечер", "📋 Мои списки", "🎲 Рулетка", "🔥 Тиндер", "📊 Статистика", "🔮 Смарт-Рекомендация"]:
+        handle_menu_text(message)
+        return
+        
+    waiting = bot.send_message(message.chat.id, "⚡ Ищу подходящие фильмы...")
     movie = search_movie_kp(message.text.strip())
     bot.delete_message(message.chat.id, waiting.message_id)
     
     if not movie: 
-        bot.send_message(message.chat.id, "❌ Ничего не нашлось. Попробуй другое название.")
+        bot.send_message(message.chat.id, "❌ Ничего не нашлось. Попробуй переформулировать.")
         return
         
     markup = types.InlineKeyboardMarkup(row_width=2)
@@ -343,7 +428,6 @@ def show_smart_recommendation(chat_id):
         items = r.get("items", [])
         bot.delete_message(chat_id, waiting.message_id)
         if items:
-            # Берем случайный фильм из топовых в этом жанре
             chosen = random.choice(items[:15])
             movie = get_movie_by_id(chosen.get("kinopoiskId"))
             if movie:
@@ -416,6 +500,47 @@ def callback(call):
             ))
         bot.answer_callback_query(call.id, "Добавлено!")
     
+    elif cmd == "duration":
+        # Новая фича: Кино на вечер
+        target = parts[1]
+        bot.edit_message_text("⏳ Ищу фильм подходящей длительности...", chat_id, msg_id)
+        
+        movie = None
+        for _ in range(5): # Пытаемся найти фильм нужной длины за несколько попыток
+            res = search_movie_kp(random_popular=True)
+            if res:
+                det = get_movie_by_id(res['id'])
+                if det and det.get('length'):
+                    l = int(det['length'])
+                    if target == 'short' and l <= 90: movie = det; break
+                    elif target == 'medium' and 90 < l <= 120: movie = det; break
+                    elif target == 'long' and l > 120: movie = det; break
+                    
+        if movie:
+            markup = types.InlineKeyboardMarkup(row_width=2)
+            markup.add(
+                types.InlineKeyboardButton("📍 В планы", callback_data=f"want|{movie['id']}"),
+                types.InlineKeyboardButton("✅ Посмотрел", callback_data=f"watch_now|{movie['id']}")
+            )
+            markup.add(types.InlineKeyboardButton("🌐 На Кинопоиск", url=f"https://www.kinopoisk.ru/film/{movie['id']}/"))
+            
+            short_desc = movie['description'][:450] + "..." if len(movie['description']) > 450 else movie['description']
+            caption = (
+                f"⏳ *КИНО НА ВЕЧЕР*\n"
+                f"═══════════════════════════\n"
+                f"🎬 *{movie['title']}* ({movie['year']})\n"
+                f"⏱ Длительность: `{movie['length']} мин.`\n"
+                f"📈 Рейтинг КП: `{movie['rating']}`\n"
+                f"🎭 Жанры: _{', '.join(movie['genres'])}_\n"
+                f"═══════════════════════════\n"
+                f"📝 *Сюжет:* {short_desc}"
+            )
+            bot.delete_message(chat_id, msg_id)
+            bot.send_photo(chat_id, movie['poster'], caption=caption, parse_mode="Markdown", reply_markup=markup)
+        else:
+            bot.edit_message_text("⚠️ Не удалось быстро подобрать фильм такой длительности. Попробуй ещё раз!", chat_id, msg_id)
+        bot.answer_callback_query(call.id)
+
     elif cmd == "menu_want":
         data = get_want_list(chat_id)
         text = "📌 *ТВОЙ СПИСОК ЖЕЛАЕМОГО:*\n═══════════════════════════\n" + "\n".join([f"🍿 {t}" for t in data]) if data else "Твой список желаемого пока пуст 🎬"
@@ -509,5 +634,5 @@ def callback(call):
 if __name__ == '__main__':
     init_db()
     keep_alive() 
-    print("Бот успешно запущен на максимальном дизайне с жанровыми фильтрами!")
+    print("Бот успешно запущен на максимальном дизайне с жанровыми фильтрами, поиском авторов и подбором на вечер!")
     bot.infinity_polling()
