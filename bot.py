@@ -35,6 +35,8 @@ TOKEN = os.environ.get('TOKEN')
 KP_API_KEY = os.environ.get('KP_API_KEY')
 GOOGLE_CREDENTIALS = os.environ.get('GOOGLE_CREDENTIALS')
 
+sheet = None
+
 bot = telebot.TeleBot(TOKEN)
 
 # --- НАДЕЖНЫЕ ФУНКЦИИ РАБОТЫ С ТАБЛИЦЕЙ ---
