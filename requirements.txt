@@ -13,4 +13,5 @@ pyTelegramBotAPI==4.35.0
 requests==2.34.2
 urllib3==2.7.0
 yarl==1.24.2
-libsql-client
+gspread
+google-auth
