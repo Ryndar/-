@@ -7,6 +7,24 @@ import gspread
 from google.oauth2.service_account import Credentials
 import json
 
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import os
+
+# --- ФЕЙКОВЫЙ СЕРВЕР ДЛЯ RENDER ---
+class DummyHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'text/plain')
+        self.end_headers()
+        self.wfile.write(b"Bot is alive and well!")
+
+def keep_alive():
+    # Render автоматически задает переменную окружения PORT, по умолчанию берем 10000
+    port = int(os.environ.get('PORT', 10000))
+    server = HTTPServer(('0.0.0.0', port), DummyHandler)
+    # Запускаем сервер в отдельном потоке, чтобы он не мешал боту
+    threading.Thread(target=server.serve_forever, daemon=True).start()
 TOKEN = os.environ.get('TOKEN')
 KP_API_KEY = os.environ.get('KP_API_KEY')
 GOOGLE_CREDENTIALS = os.environ.get('GOOGLE_CREDENTIALS')
@@ -194,5 +212,9 @@ def callback(call):
 
 if __name__ == '__main__':
     init_db()
+    
+    # Запускаем заглушку для Render
+    keep_alive() 
+    
     print("Бот успешно запущен на Google Таблицах!")
     bot.infinity_polling()
