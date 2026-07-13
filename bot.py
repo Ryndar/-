@@ -12,8 +12,7 @@ TURSO_URL = os.environ.get('TURSO_URL')
 TURSO_TOKEN = os.environ.get('TURSO_TOKEN')
 
 bot = telebot.TeleBot(TOKEN)
-config = libsql_client.Config(url=TURSO_URL, auth_token=TURSO_TOKEN)
-db = libsql_client.create_client(config)
+db = libsql_client.create_client_sync(url=TURSO_URL, auth_token=TURSO_TOKEN)
 
 # --- БАЗА ДАННЫХ (TURSO) ---
 def init_db():
