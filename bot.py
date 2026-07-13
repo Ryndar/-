@@ -182,8 +182,13 @@ def process_find_from_menu(message):
         bot.send_message(message.chat.id, "❌ Ничего не нашлось. Попробуй другое название.")
         return
         
-    markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton("📍 Добавить в 'Хочу'", callback_data=f"want|{movie['id']}"))
+    # ЭРГОНОМИКА: Кнопки «В планы», «Посмотрел» и ссылка на Кинопоиск
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton("📍 В планы", callback_data=f"want|{movie['id']}"),
+        types.InlineKeyboardButton("✅ Посмотрел", callback_data=f"watch_now|{movie['id']}")
+    )
+    markup.add(types.InlineKeyboardButton("🌐 На Кинопоиск", url=f"https://www.kinopoisk.ru/film/{movie['id']}/"))
     
     short_desc = movie['description'][:450] + "..." if len(movie['description']) > 450 else movie['description']
     caption = (
@@ -213,8 +218,8 @@ def send_roulette(chat_id, message_id=None):
         types.InlineKeyboardButton("✅ Посмотрел", callback_data="r_watch"), 
         types.InlineKeyboardButton("🔄 Крутить ещё", callback_data="r_reroll")
     )
-    
     if movie:
+        markup.add(types.InlineKeyboardButton("🌐 На Кинопоиск", url=f"https://www.kinopoisk.ru/film/{movie['id']}/"))
         short_desc = movie['description'][:450] + "..." if len(movie['description']) > 450 else movie['description']
         caption = (
             f"🎲 *РУЛЕТКА ВЫБРАЛА ФИЛЬМ:*\n"
@@ -250,15 +255,30 @@ def show_lists_menu(chat_id, message_id=None):
 
 def show_statistics(chat_id):
     w_count = len(get_want_list(chat_id))
-    d_count = len(get_watched_list(chat_id))
+    watched_dict = get_watched_list(chat_id)
+    d_count = len(watched_dict)
     fav_genre = get_favorite_genre(chat_id)
+    
+    # ФИШКА: Сканируем и выводим ТОП фильмов с оценками 9/10 и 10/10
+    top_movies = []
+    for title, rating in watched_dict.items():
+        try:
+            score = int(rating.split('/')[0].replace('⭐', '').strip())
+            if score >= 9:
+                top_movies.append(f"🏆 {title} ({score}/10)")
+        except:
+            pass
+            
+    top_text = "\n".join(top_movies[:3]) if top_movies else "Пока нет фильмов с оценкой 9 или 10"
     
     stats_text = (
         f"📊 *ЛИЧНАЯ КИНО-СТАТИСТИКА*\n"
         f"═══════════════════════════\n"
         f"📌 В планах посмотреть: `{w_count}` фильмов\n"
         f"🎬 Уже просмотрено: `{d_count}` фильмов\n"
-        f"🔥 Любимый жанр: *{fav_genre}*\n"
+        f"🔥 Любимый жанр: *{fav_genre}*\n\n"
+        f"⭐ *Твой Золотой Фонд (9-10/10):*\n"
+        f"{top_text}\n"
         f"═══════════════════════════\n"
         f"🍿 _Продолжай наполнять свой дневник!_"
     )
@@ -273,8 +293,10 @@ def play_tinder(chat_id, message_id=None):
     markup = types.InlineKeyboardMarkup(row_width=2)
     markup.add(
         types.InlineKeyboardButton("👎 Пропустить", callback_data="tinder_skip"),
-        types.InlineKeyboardButton("💚 Хочу смотреть", callback_data=f"want|{movie['id']}")
+        types.InlineKeyboardButton("💚 В планы", callback_data=f"want|{movie['id']}")
     )
+    markup.add(types.InlineKeyboardButton("✅ Уже видел", callback_data=f"watch_now|{movie['id']}"))
+    markup.add(types.InlineKeyboardButton("🌐 На Кинопоиск", url=f"https://www.kinopoisk.ru/film/{movie['id']}/"))
     
     short_desc = movie['description'][:400] + "..." if len(movie['description']) > 400 else movie['description']
     caption = (
@@ -329,6 +351,19 @@ def callback(call):
         send_roulette(chat_id, msg_id)
         bot.answer_callback_query(call.id)
         
+    # Кнопка «Посмотрел» из Поиска или Тиндера
+    elif cmd == "watch_now":
+        movie = movies_cache.get(parts[1])
+        if movie:
+            roulette_sessions[chat_id] = movie['title']  # Временно сохраняем имя для оценки
+            markup = types.InlineKeyboardMarkup(row_width=5)
+            markup.add(*[types.InlineKeyboardButton(f"{i}️⃣" if i<10 else "🔟", callback_data=f"rate|{i}") for i in range(1, 11)])
+            try: bot.delete_message(chat_id, msg_id)
+            except: pass
+            bot.send_message(chat_id, f"⭐ *Оцени фильм по 10-балльной шкале:*\n\n🍿 Какую оценку заслуживает *{movie['title']}*?", parse_mode="Markdown", reply_markup=markup)
+        bot.answer_callback_query(call.id)
+        
+    # Кнопка «Посмотрел» из Рулетки
     elif cmd == "r_watch":
         title = roulette_sessions.get(chat_id)
         if not title:
@@ -336,34 +371,23 @@ def callback(call):
             bot.answer_callback_query(call.id)
             return
             
-        # 10-БАЛЛЬНАЯ СИСТЕМА ОЦЕНОК (Выстраивается в 2 ряда по 5 кнопок автоматически)
         markup = types.InlineKeyboardMarkup(row_width=5)
-        markup.add(
-            types.InlineKeyboardButton("1️⃣", callback_data="rate|1"),
-            types.InlineKeyboardButton("2️⃣", callback_data="rate|2"),
-            types.InlineKeyboardButton("3️⃣", callback_data="rate|3"),
-            types.InlineKeyboardButton("4️⃣", callback_data="rate|4"),
-            types.InlineKeyboardButton("5️⃣", callback_data="rate|5"),
-            types.InlineKeyboardButton("6️⃣", callback_data="rate|6"),
-            types.InlineKeyboardButton("7️⃣", callback_data="rate|7"),
-            types.InlineKeyboardButton("8️⃣", callback_data="rate|8"),
-            types.InlineKeyboardButton("9️⃣", callback_data="rate|9"),
-            types.InlineKeyboardButton("🔟", callback_data="rate|10")
-        )
+        markup.add(*[types.InlineKeyboardButton(f"{i}️⃣" if i<10 else "🔟", callback_data=f"rate|{i}") for i in range(1, 11)])
         try: bot.delete_message(chat_id, msg_id)
         except: pass
         bot.send_message(chat_id, f"⭐ *Оцени фильм по 10-балльной шкале:*\n\n🍿 Какую оценку заслуживает *{title}*?", parse_mode="Markdown", reply_markup=markup)
         bot.answer_callback_query(call.id)
 
     elif cmd == "rate":
-        # Форматируем красивый вывод оценки
         rating_score = f"⭐ {parts[1]}/10"
         title = roulette_sessions.get(chat_id)
         
         if title:
             add_watched(chat_id, title, rating=rating_score)
-            bot.edit_message_text(f"🎉 Отлично! Фильм *{title}* перенесен в архив с оценкой *{rating_score}*!", chat_id, msg_id, parse_mode="Markdown")
+            bot.send_message(chat_id, f"🎉 Отлично! Фильм *{title}* перенесен в архив с оценкой *{rating_score}*!")
             roulette_sessions.pop(chat_id, None)
+            try: bot.delete_message(chat_id, msg_id)
+            except: pass
         bot.answer_callback_query(call.id, "Оценка зафиксирована!")
             
     elif cmd == "tinder_skip":
@@ -373,5 +397,5 @@ def callback(call):
 if __name__ == '__main__':
     init_db()
     keep_alive() 
-    print("Бот успешно запущен на обновленном дизайне!")
+    print("Бот успешно запущен на максимальном дизайне с новыми фишками!")
     bot.infinity_polling()
