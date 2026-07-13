@@ -28,10 +28,16 @@ def keep_alive():
     server = HTTPServer(('0.0.0.0', port), DummyHandler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
 
-# --- КОНФИГУРАЦИЯ ---
+# --- КОНФИГУРАЦИЯ И МЭППИНГ ЖАНРОВ КИНОПОИСКА ---
 TOKEN = os.environ.get('TOKEN')
 KP_API_KEY = os.environ.get('KP_API_KEY')
 GOOGLE_CREDENTIALS = os.environ.get('GOOGLE_CREDENTIALS')
+
+GENRE_MAPPING = {
+    "Триллер": 1, "Драма": 2, "Криминал": 3, "Мелодрама": 4, "Детектив": 5, 
+    "Фантастика": 6, "Фэнтези": 7, "Приключения": 8, "Боевик": 11, 
+    "Комедия": 13, "Ужасы": 17, "Мультфильм": 19, "Аниме": 24
+}
 
 bot = telebot.TeleBot(TOKEN)
 sheet = None
@@ -86,6 +92,17 @@ def get_want_list(chat_id):
     if len(rows) <= 1: return []
     return [row[1] for row in rows[1:] if len(row) >= 4 and str(row[0]) == str(chat_id) and str(row[3]) == "want"]
 
+def get_want_list_with_genres(chat_id):
+    if not sheet: return []
+    rows = sheet.get_all_values()
+    if len(rows) <= 1: return []
+    res = []
+    for row in rows[1:]:
+        if len(row) >= 4 and str(row[0]) == str(chat_id) and str(row[3]) == "want":
+            genres = [g.strip().lower() for g in row[2].split(',') if g.strip()] if len(row) >= 3 else []
+            res.append({"title": row[1], "genres": genres})
+    return res
+
 def get_watched_list(chat_id):
     if not sheet: return {}
     rows = sheet.get_all_values()
@@ -109,6 +126,29 @@ def get_favorite_genre(chat_id):
 # --- ДВИЖОК ПОИСКА КИНОПОИСКА ---
 movies_cache = {}
 roulette_sessions = {}
+
+def get_movie_by_id(mid):
+    headers = {"X-API-KEY": KP_API_KEY, "Content-Type": "application/json"}
+    url = f"https://kinopoiskapiunofficial.tech/api/v2.2/films/{mid}"
+    try:
+        m = requests.get(url, headers=headers, timeout=5).json()
+        genres_list = [g.get("genre", "другое") for g in m.get("genres", [])]
+        desc = m.get("description", "Описание сюжета отсутствует.")
+        if desc:
+            desc = desc.replace('*', '').replace('_', '').replace('`', '').strip()
+        data = {
+            "id": str(mid), 
+            "title": m.get("nameRu", m.get("nameEn", "Без названия")), 
+            "year": m.get("year", "—"), 
+            "rating": m.get("ratingKinopoisk", "0"), 
+            "genres": genres_list, 
+            "poster": m.get("posterUrl", None),
+            "description": desc
+        }
+        movies_cache[str(mid)] = data
+        return data
+    except:
+        return None
 
 def search_movie_kp(query=None, random_popular=False):
     headers = {"X-API-KEY": KP_API_KEY, "Content-Type": "application/json"}
@@ -144,14 +184,14 @@ def search_movie_kp(query=None, random_popular=False):
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    markup.add("🔍 Найти фильм", "📋 Мои списки", "🎲 Рулетка", "🔥 Тиндер", "📊 Статистика")
+    markup.add("🔍 Найти фильм", "📋 Мои списки", "🎲 Рулетка", "🔥 Тиндер", "📊 Статистика", "🔮 Смарт-Рекомендация")
     
     welcome_text = (
         "✨ *ДОБРО ПОЖАЛОВАТЬ В КИНО-ДНЕВНИК* ✨\n"
         "═════════════════════════════\n"
         "Твой персональный гид по кинематографу и трекер просмотренных фильмов.\n\n"
-        "▫️ Помогаю выбирать случайные фильмы\n"
-        "▫️ Храню подробные описания и сюжеты\n"
+        "▫️ Списки фильмов с авто-фильтрацией по жанрам\n"
+        "▫️ Умные рекомендации на базе твоих вкусов\n"
         "▫️ Синхронизирую всё с твоей Google Таблицей\n"
         "═════════════════════════════\n"
         " Используй нижнее меню для навигации 👇"
@@ -167,10 +207,11 @@ def handle_menu_text(message):
     elif message.text == "🎲 Рулетка": send_roulette(message.chat.id)
     elif message.text == "🔥 Тиндер": play_tinder(message.chat.id)
     elif message.text == "📊 Статистика": show_statistics(message.chat.id)
+    elif message.text == "🔮 Смарт-Рекомендация": show_smart_recommendation(message.chat.id)
     else: process_find_from_menu(message)
 
 def process_find_from_menu(message):
-    if message.text in ["🔍 Найти фильм", "📋 Мои списки", "🎲 Рулетка", "🔥 Тиндер", "📊 Статистика"]:
+    if message.text in ["🔍 Найти фильм", "📋 Мои списки", "🎲 Рулетка", "🔥 Тиндер", "📊 Статистика", "🔮 Смарт-Рекомендация"]:
         handle_menu_text(message)
         return
         
@@ -182,7 +223,6 @@ def process_find_from_menu(message):
         bot.send_message(message.chat.id, "❌ Ничего не нашлось. Попробуй другое название.")
         return
         
-    # ЭРГОНОМИКА: Кнопки «В планы», «Посмотрел» и ссылка на Кинопоиск
     markup = types.InlineKeyboardMarkup(row_width=2)
     markup.add(
         types.InlineKeyboardButton("📍 В планы", callback_data=f"want|{movie['id']}"),
@@ -210,7 +250,6 @@ def send_roulette(chat_id, message_id=None):
         
     choice = random.choice(want_list)
     roulette_sessions[chat_id] = choice
-    
     movie = search_movie_kp(choice)
     
     markup = types.InlineKeyboardMarkup(row_width=2)
@@ -247,6 +286,7 @@ def show_lists_menu(chat_id, message_id=None):
         types.InlineKeyboardButton("📍 Хочу посмотреть", callback_data="menu_want"), 
         types.InlineKeyboardButton("✅ Просмотрено", callback_data="menu_watched")
     )
+    markup.add(types.InlineKeyboardButton("🎭 Фильтр по жанрам", callback_data="menu_genres"))
     text = "📂 *Выберите интересующую вас категорию подборок:*"
     if message_id:
         bot.edit_message_text(text, chat_id, message_id, parse_mode="Markdown", reply_markup=markup)
@@ -259,7 +299,6 @@ def show_statistics(chat_id):
     d_count = len(watched_dict)
     fav_genre = get_favorite_genre(chat_id)
     
-    # ФИШКА: Сканируем и выводим ТОП фильмов с оценками 9/10 и 10/10
     top_movies = []
     for title, rating in watched_dict.items():
         try:
@@ -283,6 +322,54 @@ def show_statistics(chat_id):
         f"🍿 _Продолжай наполнять свой дневник!_"
     )
     bot.send_message(chat_id, stats_text, parse_mode="Markdown")
+
+def show_smart_recommendation(chat_id):
+    fav_genre = get_favorite_genre(chat_id)
+    if fav_genre in ["Не определен", "Нет данных", "Киноман без предвзятостей"]:
+        bot.send_message(chat_id, "🔮 *Для подбора смарт-рекомендации мне нужно узнать твои вкусы.* Пожалуйста, отметь несколько просмотренных фильмов оценками через Рулетку или Тиндер!", parse_mode="Markdown")
+        return
+        
+    g_id = GENRE_MAPPING.get(fav_genre)
+    if not g_id:
+        bot.send_message(chat_id, f"🔮 Твой любимый жанр: *{fav_genre}*, но алгоритм подбора под него еще настраивается. Запусти Кино-Тиндер!", parse_mode="Markdown")
+        return
+
+    waiting = bot.send_message(chat_id, f"🔮 Анализирую твои вкусы... Ищу шедевры в жанре *{fav_genre}*...")
+    headers = {"X-API-KEY": KP_API_KEY, "Content-Type": "application/json"}
+    url = f"https://kinopoiskapiunofficial.tech/api/v2.2/films?genres={g_id}&ratingFrom=7.8&order=RATING&type=FILM&page=1"
+    
+    try:
+        r = requests.get(url, headers=headers, timeout=5).json()
+        items = r.get("items", [])
+        bot.delete_message(chat_id, waiting.message_id)
+        if items:
+            # Берем случайный фильм из топовых в этом жанре
+            chosen = random.choice(items[:15])
+            movie = get_movie_by_id(chosen.get("kinopoiskId"))
+            if movie:
+                markup = types.InlineKeyboardMarkup(row_width=2)
+                markup.add(
+                    types.InlineKeyboardButton("📍 В планы", callback_data=f"want|{movie['id']}"),
+                    types.InlineKeyboardButton("✅ Посмотрел", callback_data=f"watch_now|{movie['id']}")
+                )
+                markup.add(types.InlineKeyboardButton("🌐 На Кинопоиск", url=f"https://www.kinopoisk.ru/film/{movie['id']}/"))
+                
+                short_desc = movie['description'][:400] + "..." if len(movie['description']) > 400 else movie['description']
+                caption = (
+                    f"🔮 *ПЕРСОНАЛЬНАЯ РЕКОМЕНДАЦИЯ*\n"
+                    f"_(Так как твой любимый жанр: {fav_genre})_\n"
+                    f"═══════════════════════════\n"
+                    f"🎬 *{movie['title']}* ({movie['year']})\n"
+                    f"📈 Рейтинг: `{movie['rating']}`\n"
+                    f"🎭 Жанры: _{', '.join(movie['genres'])}_\n"
+                    f"═══════════════════════════\n"
+                    f"📝 *Сюжет:* {short_desc}"
+                )
+                bot.send_photo(chat_id, movie['poster'], caption=caption, parse_mode="Markdown", reply_markup=markup)
+                return
+        bot.send_message(chat_id, "⚠️ Не удалось найти подходящие рекомендации. Попробуй позже!")
+    except:
+        bot.send_message(chat_id, "⚠️ Произошла ошибка при генерации умной рекомендации.")
 
 def play_tinder(chat_id, message_id=None):
     movie = search_movie_kp(random_popular=True)
@@ -342,6 +429,33 @@ def callback(call):
         markup = types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("🔙 Назад к категориям", callback_data="back_to_lists"))
         bot.edit_message_text(text, chat_id, msg_id, parse_mode="Markdown", reply_markup=markup)
         bot.answer_callback_query(call.id)
+
+    elif cmd == "menu_genres":
+        items = get_want_list_with_genres(chat_id)
+        if not items:
+            bot.edit_message_text("🫙 Твой список 'Хочу посмотреть' пуст, не из чего собирать жанры!", chat_id, msg_id, reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("🔙 Назад", callback_data="back_to_lists")))
+            return
+        genres = set()
+        for i in items: genres.update(i["genres"])
+        if not genres:
+            bot.edit_message_text("❌ У сохраненных фильмов не обнаружено тегов жанров.", chat_id, msg_id, reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("🔙 Назад", callback_data="back_to_lists")))
+            return
+        
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        for g in sorted(list(genres)):
+            markup.add(types.InlineKeyboardButton(f"🎬 {g.capitalize()}", callback_data=f"gfilter|{g}"))
+        markup.add(types.InlineKeyboardButton("🔙 Назад к категориям", callback_data="back_to_lists"))
+        bot.edit_message_text("🎭 *Выбери жанр из твоих закладок для фильтрации:*", chat_id, msg_id, parse_mode="Markdown", reply_markup=markup)
+        bot.answer_callback_query(call.id)
+
+    elif cmd == "gfilter":
+        target = parts[1]
+        items = get_want_list_with_genres(chat_id)
+        filtered = [i["title"] for i in items if target in i["genres"]]
+        text = f"🎭 *ФИЛЬМЫ ИЗ ТВОЕГО СПИСКА ({target.upper()}):*\n═══════════════════════════\n" + "\n".join([f"🍿 {t}" for t in filtered])
+        markup = types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("🔙 Назад к жанрам", callback_data="menu_genres"))
+        bot.edit_message_text(text, chat_id, msg_id, parse_mode="Markdown", reply_markup=markup)
+        bot.answer_callback_query(call.id)
         
     elif cmd == "back_to_lists":
         show_lists_menu(chat_id, msg_id)
@@ -351,11 +465,10 @@ def callback(call):
         send_roulette(chat_id, msg_id)
         bot.answer_callback_query(call.id)
         
-    # Кнопка «Посмотрел» из Поиска или Тиндера
     elif cmd == "watch_now":
         movie = movies_cache.get(parts[1])
         if movie:
-            roulette_sessions[chat_id] = movie['title']  # Временно сохраняем имя для оценки
+            roulette_sessions[chat_id] = movie['title']
             markup = types.InlineKeyboardMarkup(row_width=5)
             markup.add(*[types.InlineKeyboardButton(f"{i}️⃣" if i<10 else "🔟", callback_data=f"rate|{i}") for i in range(1, 11)])
             try: bot.delete_message(chat_id, msg_id)
@@ -363,7 +476,6 @@ def callback(call):
             bot.send_message(chat_id, f"⭐ *Оцени фильм по 10-балльной шкале:*\n\n🍿 Какую оценку заслуживает *{movie['title']}*?", parse_mode="Markdown", reply_markup=markup)
         bot.answer_callback_query(call.id)
         
-    # Кнопка «Посмотрел» из Рулетки
     elif cmd == "r_watch":
         title = roulette_sessions.get(chat_id)
         if not title:
@@ -397,5 +509,5 @@ def callback(call):
 if __name__ == '__main__':
     init_db()
     keep_alive() 
-    print("Бот успешно запущен на максимальном дизайне с новыми фишками!")
+    print("Бот успешно запущен на максимальном дизайне с жанровыми фильтрами!")
     bot.infinity_polling()
