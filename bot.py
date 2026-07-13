@@ -11,20 +11,11 @@ KP_API_KEY = os.environ.get('KP_API_KEY')
 
 bot = telebot.TeleBot(TOKEN)
 
-# --- ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ ---
+# --- ИНИЦИАЛИЗАЦИЯ БАЗЫ ---
 def init_db():
     conn = sqlite3.connect('movies.db')
     c = conn.cursor()
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS movies (
-            chat_id INTEGER,
-            title TEXT,
-            genres TEXT,
-            status TEXT, 
-            rating TEXT,
-            UNIQUE(chat_id, title)
-        )
-    ''')
+    c.execute('CREATE TABLE IF NOT EXISTS movies (chat_id INTEGER, title TEXT, genres TEXT, status TEXT, rating TEXT, UNIQUE(chat_id, title))')
     conn.commit()
     conn.close()
 
@@ -159,6 +150,76 @@ def send_welcome(message):
     )
     bot.send_message(message.chat.id, text, parse_mode="Markdown", reply_markup=get_main_menu())
 
+# --- ФУНКЦИИ-ПОМОЩНИКИ ---
+def get_stars(rating_str):
+    try:
+        rating = int(float(rating_str.replace(',', '.')))
+        return "⭐️" * (rating // 2) + "🌑" * (5 - (rating // 2))
+    except: return "🌑🌑🌑🌑🌑"
+
+def add_want(chat_id, title, genres):
+    conn = sqlite3.connect('movies.db')
+    c = conn.cursor()
+    c.execute('INSERT OR REPLACE INTO movies (chat_id, title, genres, status, rating) VALUES (?, ?, ?, "want", "")', (chat_id, title, ','.join(genres)))
+    conn.commit()
+    conn.close()
+    # --- ЛОГИКА РУЛЕТКИ ---
+def send_roulette(chat_id, message_id=None):
+    conn = sqlite3.connect('movies.db')
+    c = conn.cursor()
+    c.execute('SELECT title FROM movies WHERE chat_id=? AND status="want"', (chat_id,))
+    want_list = [row[0] for row in c.fetchall()]
+    conn.close()
+    
+    if not want_list:
+        bot.send_message(chat_id, "Список пуст!")
+        return
+
+    choice = random.choice(want_list)
+    text = f"🎲 *Кино-рулетка сделала выбор!*\n\nПредлагаю посмотреть:\n🎬 *{choice}*"
+    
+    markup = types.InlineKeyboardMarkup()
+    markup.add(
+        types.InlineKeyboardButton("✅ Посмотрели (Оценить)", callback_data=f"r_watch|{choice[:30]}"),
+        types.InlineKeyboardButton("🎬 Трейлер", url=f"https://www.youtube.com/results?search_query={choice}+трейлер"),
+        types.InlineKeyboardButton("🔄 Другой фильм", callback_data="r_reroll")
+    )
+    
+    if message_id: bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text, parse_mode="Markdown", reply_markup=markup)
+    else: bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=markup)
+
+# --- ОБРАБОТЧИК КНОПОК ---
+@bot.callback_query_handler(func=lambda call: True)
+def handle_buttons(call):
+    chat_id = call.message.chat.id
+    msg_id = call.message.message_id
+    parts = call.data.split('|')
+    cmd = parts[0]
+
+    # Интерактивная кнопка "Добавлено" (дизайн)
+    if cmd == "want":
+        title = parts[1]
+        add_want(chat_id, title, [])
+        new_markup = types.InlineKeyboardMarkup()
+        new_markup.add(types.InlineKeyboardButton("✅ Добавлено", callback_data="none"))
+        bot.edit_message_reply_markup(chat_id, msg_id, reply_markup=new_markup)
+        bot.answer_callback_query(call.id, "Добавлено в список!")
+
+    # Список просмотренных со звездами
+    elif cmd == "menu_watched":
+        conn = sqlite3.connect('movies.db')
+        c = conn.cursor()
+        c.execute('SELECT title, rating FROM movies WHERE chat_id=? AND status="watched"', (chat_id,))
+        text = "✅ *Просмотрено:*\n━━━━━━━━━━━━━━━━━━\n"
+        rows = c.fetchall()
+        for title, rating in rows:
+            text += f"{title} | {get_stars(rating)}\n"
+        conn.close()
+        if not rows: text += "_Список пуст_"
+        bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text=text, parse_mode="Markdown")
+
+    elif cmd == "r_reroll":
+        send_roulette(chat_id, msg_id)
 # --- УМНАЯ РУЛЕТКА ---
 def send_roulette(chat_id, message_id=None):
     want_list = list(get_want_list(chat_id).keys())
@@ -492,5 +553,5 @@ def process_rating(message, title):
 
 if __name__ == '__main__':
     init_db()
-    print("Бот готов! Рулетка прокачана кнопками.")
+    print("Бот запущен на сервере!")
     bot.infinity_polling()
