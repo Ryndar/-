@@ -2,50 +2,76 @@ import telebot
 from telebot import types
 import requests
 import random
-import threading
 import os
-import libsql_client
+import gspread
+from google.oauth2.service_account import Credentials
+import json
 
 TOKEN = os.environ.get('TOKEN')
 KP_API_KEY = os.environ.get('KP_API_KEY')
-TURSO_URL = os.environ.get('TURSO_URL')
-TURSO_TOKEN = os.environ.get('TURSO_TOKEN')
+GOOGLE_CREDENTIALS = os.environ.get('GOOGLE_CREDENTIALS')
 
 bot = telebot.TeleBot(TOKEN)
-db = libsql_client.create_client_sync(url=TURSO_URL, auth_token=TURSO_TOKEN)
 
-# --- БАЗА ДАННЫХ (TURSO) ---
+# --- ИНИЦИАЛИЗАЦИЯ GOOGLE TABLES ---
+try:
+    creds_dict = json.loads(GOOGLE_CREDENTIALS)
+    scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+    creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+    gc = gspread.authorize(creds)
+    # Открываем таблицу по названию
+    sheet = gc.open("Кино-дневник").sheet1
+except Exception as e:
+    print(f"❌ Ошибка подключения к Google Таблицам: {e}")
+    sheet = None
+
+# --- ФУНКЦИИ РАБОТЫ С ТАБЛИЦЕЙ (ВМЕСТО SQL) ---
 def init_db():
-    db.execute('CREATE TABLE IF NOT EXISTS movies (chat_id INTEGER, title TEXT, genres TEXT, status TEXT, rating TEXT, UNIQUE(chat_id, title))')
+    if sheet and not sheet.row_values(1):
+        sheet.append_row(["chat_id", "title", "genres", "status", "rating"])
 
 def add_want(chat_id, title, genres):
+    if not sheet: return
     genres_str = ','.join(genres) if isinstance(genres, list) else str(genres)
-    db.execute('INSERT OR REPLACE INTO movies (chat_id, title, genres, status, rating) VALUES (?, ?, ?, "want", "")', [chat_id, title, genres_str])
+    records = sheet.get_all_records()
+    
+    # Ищем, нет ли уже фильма у этого юзера
+    for idx, row in enumerate(records, start=2): # start=2 так как 1 строка - заголовки
+        if str(row.get('chat_id')) == str(chat_id) and str(row.get('title')) == str(title):
+            sheet.update_cell(idx, 4, "want") # Колонка D (status)
+            return
+            
+    sheet.append_row([str(chat_id), str(title), genres_str, "want", ""])
 
 def add_watched(chat_id, title, rating="—"):
-    res = db.execute('SELECT genres FROM movies WHERE chat_id=? AND title=?', [chat_id, title])
-    genres = res.rows[0][0] if res.rows else ""
-    db.execute('INSERT OR REPLACE INTO movies (chat_id, title, genres, status, rating) VALUES (?, ?, ?, "watched", ?)', [chat_id, title, genres, rating])
+    if not sheet: return
+    records = sheet.get_all_records()
+    
+    for idx, row in enumerate(records, start=2):
+        if str(row.get('chat_id')) == str(chat_id) and str(row.get('title')) == str(title):
+            sheet.update_cell(idx, 4, "watched") # Колонка D
+            sheet.update_cell(idx, 5, str(rating)) # Колонка E
+            return
+            
+    sheet.append_row([str(chat_id), str(title), "", "watched", str(rating)])
 
 def get_want_list(chat_id):
-    res = db.execute('SELECT title FROM movies WHERE chat_id=? AND status="want"', [chat_id])
-    return [row[0] for row in res.rows]
+    if not sheet: return []
+    records = sheet.get_all_records()
+    return [row.get('title') for row in records if str(row.get('chat_id')) == str(chat_id) and str(row.get('status')) == "want"]
 
 def get_watched_list(chat_id):
-    res = db.execute('SELECT title, rating FROM movies WHERE chat_id=? AND status="watched"', [chat_id])
-    return {row[0]: row[1] for row in res.rows}
+    if not sheet: return {}
+    records = sheet.get_all_records()
+    return {row.get('title'): row.get('rating') for row in records if str(row.get('chat_id')) == str(chat_id) and str(row.get('status')) == "watched"}
 
-def remove_movie(chat_id, title):
-    db.execute('DELETE FROM movies WHERE chat_id=? AND title=?', [chat_id, title])
-
-# --- СОСТОЯНИЯ И КЭШ ---
+# --- ОСТАЛЬНОЙ ФУНКЦИОНАЛ БОТА ---
 movies_cache = {}
-roulette_sessions = {}  # Исправляет баг с обрезкой названия фильма
-tinder_sessions = {}
+roulette_sessions = {}
 
 def search_movie_kp(query=None, random_popular=False):
     headers = {"X-API-KEY": KP_API_KEY, "Content-Type": "application/json"}
-    url = f"https://kinopoiskapiunofficial.tech/api/v2.1/films/search-by-keyword?keyword={query}&page=1" if query else f"https://kinopoiskapiunofficial.tech/api/v2.2/films/collections?type=TOP_POPULAR_ALL&page={random.randint(1, 10)}"
+    url = f"https://kinopoiskapiunofficial.tech/api/v2.1/films/search-by-keyword?keyword={query}&page=1" if query else f"https://kinopoiskapiunofficial.tech/api/v2.2/films/collections?type=TOP_POPULAR_ALL&page={random.randint(1, 5)}"
     try:
         r = requests.get(url, headers=headers, timeout=5).json()
         items = r.get("films", []) or r.get("items", [])
@@ -67,28 +93,22 @@ def search_movie_kp(query=None, random_popular=False):
         print(f"Ошибка API: {e}")
         return None
 
-# --- МЕНЮ И ОБРАБОТЧИКИ ---
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
     markup.add("🔍 Найти фильм", "📋 Мои списки", "🎲 Рулетка", "🔥 Тиндер", "📊 Статистика")
-    bot.send_message(message.chat.id, "🍿 Кино-дневник готов!", reply_markup=markup)
+    bot.send_message(message.chat.id, "🍿 Кино-дневник на Google Таблицах готов!", reply_markup=markup)
 
 @bot.message_handler(content_types=['text'])
 def handle_menu_text(message):
     if message.text == "🔍 Найти фильм":
         msg = bot.send_message(message.chat.id, "Введите название фильма:")
         bot.register_next_step_handler(msg, process_find_from_menu)
-    elif message.text == "📋 Мои списки": 
-        show_lists_menu(message.chat.id)
-    elif message.text == "🎲 Рулетка": 
-        send_roulette(message.chat.id)
-    elif message.text == "🔥 Тиндер": 
-        play_tinder(message.chat.id)
-    elif message.text == "📊 Статистика": 
-        show_statistics(message.chat.id)
-    else: 
-        process_find_from_menu(message)
+    elif message.text == "📋 Мои списки": show_lists_menu(message.chat.id)
+    elif message.text == "🎲 Рулетка": send_roulette(message.chat.id)
+    elif message.text == "🔥 Тиндер": play_tinder(message.chat.id)
+    elif message.text == "📊 Статистика": show_statistics(message.chat.id)
+    else: process_find_from_menu(message)
 
 def process_find_from_menu(message):
     if message.text in ["🔍 Найти фильм", "📋 Мои списки", "🎲 Рулетка", "🔥 Тиндер", "📊 Статистика"]:
@@ -96,28 +116,26 @@ def process_find_from_menu(message):
         return
     movie = search_movie_kp(message.text.strip())
     if not movie: 
-        bot.send_message(message.chat.id, "Ничего не нашлось. Попробуйте другое название.")
+        bot.send_message(message.chat.id, "Ничего не нашлось.")
         return
     markup = types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("📍 В 'Хочу'", callback_data=f"want|{movie['id']}"))
-    bot.send_photo(message.chat.id, movie['poster'], caption=f"🎬 *{movie['title']}* ({movie['year']})\n⭐️ Рейтинг: {movie['rating']}", parse_mode="Markdown", reply_markup=markup)
+    bot.send_photo(message.chat.id, movie['poster'], caption=f"🎬 *{movie['title']}* ({movie['year']})", parse_mode="Markdown", reply_markup=markup)
 
 def send_roulette(chat_id, message_id=None):
     want_list = get_want_list(chat_id)
     if not want_list: 
-        bot.send_message(chat_id, "Ваш список 'Хочу' пуст! Сначала добавьте туда фильмы.")
+        bot.send_message(chat_id, "Список 'Хочу' пуст!")
         return
     choice = random.choice(want_list)
-    roulette_sessions[chat_id] = choice  # Сохраняем выбор в сессию
+    roulette_sessions[chat_id] = choice
     
     markup = types.InlineKeyboardMarkup().add(
         types.InlineKeyboardButton("✅ Посмотрел", callback_data="r_watch"), 
         types.InlineKeyboardButton("🔄 Другой", callback_data="r_reroll")
     )
     text = f"🎲 Предлагаю посмотреть:\n\n🍿 *{choice}*"
-    if message_id: 
-        bot.edit_message_text(text, chat_id, message_id, parse_mode="Markdown", reply_markup=markup)
-    else: 
-        bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=markup)
+    if message_id: bot.edit_message_text(text, chat_id, message_id, parse_mode="Markdown", reply_markup=markup)
+    else: bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=markup)
 
 def show_lists_menu(chat_id):
     markup = types.InlineKeyboardMarkup().add(
@@ -127,19 +145,16 @@ def show_lists_menu(chat_id):
     bot.send_message(chat_id, "Какой список открыть?", reply_markup=markup)
 
 def show_statistics(chat_id):
-    bot.send_message(chat_id, f"📊 *Ваша статистика:*\n\n📍 В планах: {len(get_want_list(chat_id))}\n✅ Просмотрено: {len(get_watched_list(chat_id))}", parse_mode="Markdown")
+    bot.send_message(chat_id, f"📊 *Статистика:*\n\n📍 В планах: {len(get_want_list(chat_id))}\n✅ Просмотрено: {len(get_watched_list(chat_id))}", parse_mode="Markdown")
 
 def play_tinder(chat_id):
-    # Упрощенная заглушка для Тиндера (случайный популярный фильм)
     movie = search_movie_kp(random_popular=True)
-    if not movie:
-        bot.send_message(chat_id, "Не удалось загрузить фильм для Тиндера.")
-        return
+    if not movie: return
     markup = types.InlineKeyboardMarkup().add(
         types.InlineKeyboardButton("❌ Мимо", callback_data="tinder_skip"),
         types.InlineKeyboardButton("💚 Хочу!", callback_data=f"want|{movie['id']}")
     )
-    bot.send_photo(chat_id, movie['poster'], caption=f"🔥 *Тиндер*\n\n🎬 *{movie['title']}*\n📝 {movie['overview'][:200]}...", parse_mode="Markdown", reply_markup=markup)
+    bot.send_photo(chat_id, movie['poster'], caption=f"🔥 *Тиндер*\n\n🎬 *{movie['title']}*", parse_mode="Markdown", reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: True)
 def callback(call):
@@ -152,16 +167,15 @@ def callback(call):
         if movie:
             add_want(chat_id, movie['title'], movie['genres'])
             bot.edit_message_reply_markup(chat_id, msg_id, reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("✅ В списке 'Хочу'", callback_data="none")))
-            bot.answer_callback_query(call.id, "Добавлено!")
     
     elif cmd == "menu_want":
         data = get_want_list(chat_id)
-        text = "📍 *Ваш список 'Хочу':*\n\n" + "\n".join([f"• {title}" for title in data]) if data else "Список 'Хочу' пока пуст."
+        text = "📍 *Список 'Хочу':*\n\n" + "\n".join([f"• {t}" for t in data]) if data else "Пусто."
         bot.edit_message_text(text, chat_id, msg_id, parse_mode="Markdown")
         
     elif cmd == "menu_watched":
         data = get_watched_list(chat_id)
-        text = "✅ *Просмотренные фильмы:*\n\n" + "\n".join([f"• {t} (⭐️ {r})" for t, r in data.items()]) if data else "Вы еще не отметили ни одного фильма."
+        text = "✅ *Просмотрено:*\n\n" + "\n".join([f"• {t} (⭐️ {r})" for t, r in data.items()]) if data else "Пусто."
         bot.edit_message_text(text, chat_id, msg_id, parse_mode="Markdown")
         
     elif cmd == "r_reroll": 
@@ -171,7 +185,7 @@ def callback(call):
         title = roulette_sessions.get(chat_id)
         if title:
             add_watched(chat_id, title, rating="Посмотрено")
-            bot.edit_message_text(f"🎉 Отлично! Фильм *{title}* перенесен в просмотренные.", chat_id, msg_id, parse_mode="Markdown")
+            bot.edit_message_text(f"🎉 Фильм *{title}* перенесен в просмотренные!", chat_id, msg_id, parse_mode="Markdown")
             roulette_sessions.pop(chat_id, None)
             
     elif cmd == "tinder_skip":
@@ -180,5 +194,5 @@ def callback(call):
 
 if __name__ == '__main__':
     init_db()
-    print("Бот успешно запущен!")
+    print("Бот успешно запущен на Google Таблицах!")
     bot.infinity_polling()
