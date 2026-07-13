@@ -37,58 +37,70 @@ GOOGLE_CREDENTIALS = os.environ.get('GOOGLE_CREDENTIALS')
 
 bot = telebot.TeleBot(TOKEN)
 
-# --- ИНИЦИАЛИЗАЦИЯ GOOGLE TABLES ---
-try:
-    creds_dict = json.loads(GOOGLE_CREDENTIALS)
-    scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
-    creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
-    gc = gspread.authorize(creds)
-    # Открываем таблицу по названию
-    sheet = gc.open("Кино-дневник").sheet1
-except Exception as e:
-    print(f"❌ Ошибка подключения к Google Таблицам: {e}")
-    sheet = None
+# --- НАДЕЖНЫЕ ФУНКЦИИ РАБОТЫ С ТАБЛИЦЕЙ ---
 
-# --- ФУНКЦИИ РАБОТЫ С ТАБЛИЦЕЙ (ВМЕСТО SQL) ---
 def init_db():
-    if sheet and not sheet.row_values(1):
+    if not sheet:
+        print("⚠️ Предупреждение: Таблица не инициализирована!")
+        return
+    # Если в таблице вообще нет строк, создаем заголовки
+    if len(sheet.get_all_values()) == 0:
         sheet.append_row(["chat_id", "title", "genres", "status", "rating"])
 
 def add_want(chat_id, title, genres):
-    if not sheet: return
+    if not sheet:
+        print("❌ Ошибка: Попытка записи, но таблица недоступна!")
+        return
+        
     genres_str = ','.join(genres) if isinstance(genres, list) else str(genres)
-    records = sheet.get_all_records()
+    rows = sheet.get_all_values()  # Получаем таблицу как список списков
     
-    # Ищем, нет ли уже фильма у этого юзера
-    for idx, row in enumerate(records, start=2): # start=2 так как 1 строка - заголовки
-        if str(row.get('chat_id')) == str(chat_id) and str(row.get('title')) == str(title):
-            sheet.update_cell(idx, 4, "want") # Колонка D (status)
+    # Ищем, нет ли уже этого фильма у юзера (ищем по номерам элементов)
+    for idx, row in enumerate(rows, start=1):
+        if len(row) >= 2 and str(row[0]) == str(chat_id) and str(row[1]) == str(title):
+            sheet.update_cell(idx, 4, "want")  # 4-я колонка — это статус (D)
             return
             
+    # Если не нашли, просто добавляем новую строчку
     sheet.append_row([str(chat_id), str(title), genres_str, "want", ""])
 
 def add_watched(chat_id, title, rating="—"):
     if not sheet: return
-    records = sheet.get_all_records()
+    rows = sheet.get_all_values()
     
-    for idx, row in enumerate(records, start=2):
-        if str(row.get('chat_id')) == str(chat_id) and str(row.get('title')) == str(title):
-            sheet.update_cell(idx, 4, "watched") # Колонка D
-            sheet.update_cell(idx, 5, str(rating)) # Колонка E
+    for idx, row in enumerate(rows, start=1):
+        if len(row) >= 2 and str(row[0]) == str(chat_id) and str(row[1]) == str(title):
+            sheet.update_cell(idx, 4, "watched")
+            sheet.update_cell(idx, 5, str(rating))  # 5-я колонка — рейтинг (E)
             return
             
     sheet.append_row([str(chat_id), str(title), "", "watched", str(rating)])
 
 def get_want_list(chat_id):
-    if not sheet: return []
-    records = sheet.get_all_records()
-    return [row.get('title') for row in records if str(row.get('chat_id')) == str(chat_id) and str(row.get('status')) == "want"]
+    if not sheet: 
+        print("❌ Ошибка: Попытка чтения списка 'Хочу', но таблица недоступна!")
+        return []
+        
+    rows = sheet.get_all_values()
+    if len(rows) <= 1: return []  # Если только заголовки или пусто
+    
+    titles = []
+    for row in rows[1:]:  # Пропускаем первую строчку с заголовками
+        # row[0] - chat_id, row[1] - title, row[3] - status
+        if len(row) >= 4 and str(row[0]) == str(chat_id) and str(row[3]) == "want":
+            titles.append(row[1])
+    return titles
 
 def get_watched_list(chat_id):
     if not sheet: return {}
-    records = sheet.get_all_records()
-    return {row.get('title'): row.get('rating') for row in records if str(row.get('chat_id')) == str(chat_id) and str(row.get('status')) == "watched"}
-
+    rows = sheet.get_all_values()
+    if len(rows) <= 1: return {}
+    
+    watched = {}
+    for row in rows[1:]:
+        if len(row) >= 5 and str(row[0]) == str(chat_id) and str(row[3]) == "watched":
+            watched[row[1]] = row[4]
+    return watched
 # --- ОСТАЛЬНОЙ ФУНКЦИОНАЛ БОТА ---
 movies_cache = {}
 roulette_sessions = {}
